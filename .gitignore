@@ -1,0 +1,5 @@
+.env
+*.env
+neon.env
+database/neon.env
+backend/.env
