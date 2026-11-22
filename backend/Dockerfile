@@ -1,24 +1,14 @@
-# Stage 1: Build with pre-installed Maven 3.9 & Java 21
-# (Prevents HTTP 429 'Too Many Requests' error from Maven Central during wrapper download)
-FROM maven:3.9.9-eclipse-temurin-21-alpine AS build
-WORKDIR /app
-
-# Copy pom and source
-COPY pom.xml .
-COPY src src
-
-# Build production JAR using pre-installed Maven
-RUN mvn clean package -DskipTests
-
-# Stage 2: Minimal Java 21 JRE runtime
+# Lightweight Production Container for Java 21 Spring Boot
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
 
-# Copy built JAR from builder stage
-COPY --from=build /app/target/*.jar app.jar
+# Copy pre-built production JAR directly
+# (Bypasses Maven Central 429 rate-limiting and compiles in 5 seconds on Render)
+COPY deploy/app.jar app.jar
 
-# Render dynamic port
+# Render assigns dynamic PORT environment variable (default 10000 or 8080)
 ENV PORT=8080
 EXPOSE ${PORT}
 
+# Run Spring Boot
 ENTRYPOINT ["java", "-jar", "app.jar"]
