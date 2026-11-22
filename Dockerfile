@@ -1,29 +1,24 @@
-# Multi-stage Docker build for Java 21 Spring Boot
-FROM eclipse-temurin:21-jdk-alpine AS build
+# Stage 1: Build with pre-installed Maven 3.9 & Java 21
+# (Prevents HTTP 429 'Too Many Requests' error from Maven Central during wrapper download)
+FROM maven:3.9.9-eclipse-temurin-21-alpine AS build
 WORKDIR /app
 
-# Copy Maven Wrapper and POM
-COPY backend/mvnw .
-COPY backend/.mvn .mvn
+# Copy pom and source
 COPY backend/pom.xml .
-
-# Ensure mvnw has execute permissions
-RUN chmod +x ./mvnw
-
-# Copy source code and build production JAR
 COPY backend/src src
-RUN ./mvnw clean package -DskipTests
 
-# Stage 2: Lightweight JRE runtime
+# Build production JAR using pre-installed Maven
+RUN mvn clean package -DskipTests
+
+# Stage 2: Minimal Java 21 JRE runtime
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
 
-# Copy the generated JAR
+# Copy built JAR from builder stage
 COPY --from=build /app/target/*.jar app.jar
 
-# Render assigns dynamic PORT environment variable (default 10000 or 8080)
+# Render dynamic port
 ENV PORT=8080
 EXPOSE ${PORT}
 
-# Run Spring Boot app
 ENTRYPOINT ["java", "-jar", "app.jar"]
