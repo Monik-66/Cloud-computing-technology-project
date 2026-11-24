@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useRef } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { api, SESSION_KEY } from './services/api.js'
 
 const icons = {
+  camera: <><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></>,
+  qr: <><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><path d="M7 17h.01M17 7h.01M7 7h.01M17 17h.01"/></>,
   overview: <><rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/></>,
   attendance: <><path d="M8 3.5H6.5A2.5 2.5 0 0 0 4 6v13.5A2.5 2.5 0 0 0 6.5 22h11a2.5 2.5 0 0 0 2.5-2.5V6a2.5 2.5 0 0 0-2.5-2.5H16"/><path d="M8 3.5A1.5 1.5 0 0 1 9.5 2h5A1.5 1.5 0 0 1 16 3.5v2H8zM8 12h8M8 16h5"/></>,
   timetable: <><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18M8 14h2M14 14h2M8 18h2"/></>,
@@ -189,12 +191,162 @@ function LoadNotice({ loading, error, empty, emptyText = 'Nothing to show yet.' 
 
 function EmptyRow({ columns, children }) { return <tr><td colSpan={columns} className="empty-cell">{children}</td></tr> }
 
+function StudentScannerModal({ studentId, onClose, onSuccess }) {
+  const [tokenInput, setTokenInput] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [success, setSuccess] = useState('')
+  const [cameraActive, setCameraActive] = useState(false)
+  const [cameraError, setCameraError] = useState('')
+  const videoRef = useRef(null)
+  const streamRef = useRef(null)
+  const intervalRef = useRef(null)
+
+  const stopCamera = () => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current)
+      intervalRef.current = null
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop())
+      streamRef.current = null
+    }
+    setCameraActive(false)
+  }
+
+  const startCamera = async () => {
+    setCameraError('')
+    setError('')
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' }
+      })
+      streamRef.current = stream
+      setCameraActive(true)
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream
+          videoRef.current.play().catch(() => {})
+        }
+      }, 100)
+
+      if ('BarcodeDetector' in window) {
+        const detector = new window.BarcodeDetector({ formats: ['qr_code'] })
+        intervalRef.current = setInterval(async () => {
+          if (videoRef.current && videoRef.current.readyState >= 2) {
+            try {
+              const barcodes = await detector.detect(videoRef.current)
+              if (barcodes.length > 0) {
+                const scanned = barcodes[0].rawValue?.trim()
+                if (scanned) {
+                  stopCamera()
+                  submitCheckIn(scanned)
+                }
+              }
+            } catch {
+              // ignore frame read errors
+            }
+          }
+        }, 300)
+      } else {
+        setCameraError('Live barcode scanning is not supported by this browser. Enter the session token below.')
+      }
+    } catch {
+      setCameraError('Could not access camera. Please allow camera permissions or enter the code manually.')
+      setCameraActive(false)
+    }
+  }
+
+  useEffect(() => {
+    return () => stopCamera()
+  }, [])
+
+  const submitCheckIn = async (tokenToUse) => {
+    const raw = (tokenToUse || tokenInput).trim()
+    if (!raw) {
+      setError('Please provide a valid session code')
+      return
+    }
+    setBusy(true)
+    setError('')
+    setSuccess('')
+    try {
+      const res = await api.checkIn({ sessionToken: raw, studentId })
+      setSuccess('Attendance marked successfully! You are recorded as PRESENT.')
+      stopCamera()
+      if (onSuccess) onSuccess(res)
+    } catch (err) {
+      setError(err.message || 'Check-in failed. The session may have expired or you may have already checked in.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="request-modal session-modal" role="dialog" aria-modal="true" style={{ maxWidth: '460px' }}>
+        <div className="modal-top">
+          <span className="modal-icon"><Icon name="camera" size={20}/></span>
+          <button className="icon-button" onClick={onClose} aria-label="Close"><Icon name="close" size={17}/></button>
+        </div>
+        <h2>Scan attendance QR</h2>
+        <p>Scan the QR code displayed on the classroom screen, or paste the session code to verify your attendance.</p>
+
+        {error && <div className="error-banner" role="alert" style={{ marginBottom: '14px' }}>{error}</div>}
+        {success && <div className="success-banner" style={{ marginBottom: '14px', background: '#dcfce7', color: '#15803d', padding: '12px 14px', borderRadius: '8px' }}>{success}</div>}
+
+        <div style={{ background: 'var(--surface-sunken, #f8fafc)', padding: '16px', borderRadius: '10px', border: '1px solid var(--line)', marginBottom: '16px', textAlign: 'center' }}>
+          {cameraActive ? (
+            <div>
+              <div style={{ position: 'relative', width: '100%', height: '220px', background: '#000', borderRadius: '8px', overflow: 'hidden', margin: '0 auto 12px' }}>
+                <video ref={videoRef} autoPlay playsInline muted style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                <div style={{ position: 'absolute', inset: '24px', border: '2px dashed #3b82f6', borderRadius: '8px', pointerEvents: 'none' }} />
+              </div>
+              <button className="button button-secondary" type="button" onClick={stopCamera}>Turn off camera</button>
+            </div>
+          ) : (
+            <div>
+              <button className="button button-primary" type="button" onClick={startCamera} style={{ width: '100%', justifyContent: 'center' }}>
+                <Icon name="camera" size={18}/> Open camera scanner
+              </button>
+              {cameraError && <p style={{ color: '#dc2626', fontSize: '13px', margin: '8px 0 0' }}>{cameraError}</p>}
+            </div>
+          )}
+        </div>
+
+        <form onSubmit={(e) => { e.preventDefault(); submitCheckIn(); }}>
+          <label className="form-label">
+            Or enter session code / token
+            <input
+              type="text"
+              value={tokenInput}
+              onChange={(e) => setTokenInput(e.target.value)}
+              placeholder="e.g. 5e913a7c-8e01-4467..."
+              disabled={busy}
+              style={{ fontFamily: 'monospace', fontSize: '13px' }}
+            />
+          </label>
+          <div className="modal-actions">
+            <button className="button button-secondary" type="button" onClick={onClose} disabled={busy}>Close</button>
+            <button className="button button-primary" type="submit" disabled={busy || !tokenInput.trim() || !!success}>
+              {busy ? 'Verifying…' : 'Mark attendance'}
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  )
+}
+
 function StudentPortal({ session, dark, setDark, onLogout }) {
   const [active, setActive] = useState('overview')
   const [data, setData] = useState({ attendance: null, timetable: [], notifications: [] })
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [refresh, setRefresh] = useState(0)
+  const [showScanner, setShowScanner] = useState(false)
+  const [toast, setToast] = useState('')
+
   useEffect(() => {
     let alive = true
     setLoading(true)
@@ -208,18 +360,66 @@ function StudentPortal({ session, dark, setDark, onLogout }) {
     })
     return () => { alive = false }
   }, [session.profileId, refresh])
-  const items = [{ id: 'overview', label: 'Overview', icon: 'overview' }, { id: 'attendance', label: 'Attendance', icon: 'attendance' }, { id: 'timetable', label: 'Timetable', icon: 'timetable' }, { id: 'notifications', label: 'Notifications', icon: 'bell', count: data.notifications.filter((n) => !n.isRead).length }]
+
+  const items = [
+    { id: 'overview', label: 'Overview', icon: 'overview' },
+    { id: 'scan', label: 'Scan attendance', icon: 'camera' },
+    { id: 'attendance', label: 'Attendance', icon: 'attendance' },
+    { id: 'timetable', label: 'Timetable', icon: 'timetable' },
+    { id: 'notifications', label: 'Notifications', icon: 'bell', count: data.notifications.filter((n) => !n.isRead).length }
+  ]
   const attendance = data.attendance
   const subjects = attendance?.subjectBreakdown || []
   const todaySlots = data.timetable.filter(isTodaySlot)
+
   return <PortalShell session={session} role="STUDENT" active={active} setActive={setActive} items={items} dark={dark} setDark={setDark} onLogout={onLogout}>{({ search }) => <>
-    <PageIntro eyebrow={`${session.className || 'Student account'}${session.labBatch ? ` · ${session.labBatch}` : ''}`} title={active === 'overview' ? `Welcome back, ${shortName(session.fullName)}` : items.find((item) => item.id === active)?.label} description="A clear view of attendance and what’s happening in your classes." action={<button className="button button-secondary" onClick={() => setRefresh((value) => value + 1)}><Icon name="refresh" size={15}/>Refresh</button>}/>
+    <PageIntro
+      eyebrow={`${session.className || 'Student account'}${session.labBatch ? ` · ${session.labBatch}` : ''}`}
+      title={active === 'overview' ? `Welcome back, ${shortName(session.fullName)}` : items.find((item) => item.id === active)?.label}
+      description="A clear view of attendance and what’s happening in your classes."
+      action={
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+          <button className="button button-primary" onClick={() => setShowScanner(true)}>
+            <Icon name="camera" size={16}/> Scan QR code
+          </button>
+          <button className="button button-secondary" onClick={() => setRefresh((value) => value + 1)}>
+            <Icon name="refresh" size={15}/>Refresh
+          </button>
+        </div>
+      }
+    />
+    {toast && <div className="toast-message" style={{ marginBottom: '16px' }}><Icon name="check" size={16}/>{toast}<button onClick={() => setToast('')}><Icon name="close" size={14}/></button></div>}
     <LoadNotice loading={loading} error={error} />
+    
     {active === 'overview' && <><section className="stats-grid"><Metric label="Overall attendance" value={attendance ? `${Number(attendance.overallPercentage).toFixed(1)}%` : '—'} hint={Number(attendance?.overallPercentage) < 75 ? 'Below the 75% requirement' : 'You’re meeting the requirement'} tone={Number(attendance?.overallPercentage) < 75 ? 'orange' : 'green'} icon="attendance"/><Metric label="Classes attended" value={`${attendance?.attendedSessions ?? 0} / ${attendance?.totalSessions ?? 0}`} hint="Recorded attendance" tone="blue" icon="check"/><Metric label="Subjects tracked" value={subjects.length} hint="Current subject breakdown" tone="purple" icon="book"/><Metric label="Unread alerts" value={data.notifications.filter((n) => !n.isRead).length} hint="From your college" tone="orange" icon="bell"/></section>
       <section className="portal-grid"><Panel eyebrow="SUBJECT BREAKDOWN" title="Attendance by subject" className="portal-subject-panel"><LoadNotice loading={loading} error={error} empty={!subjects.length} emptyText="Your subject attendance will appear here once sessions are recorded."/>{subjects.map((subject) => <SubjectProgress key={subject.subjectId} subject={subject}/>)}</Panel><Panel eyebrow="TODAY" title="Your timetable" action={<button className="text-button" onClick={() => setActive('timetable')}>Full week <Icon name="chevron" size={14}/></button>}><TimetableRows rows={todaySlots} search={search} emptyText="No classes are scheduled for today."/></Panel></section></>}
+    
+    {active === 'scan' && (
+      <Panel eyebrow="ATTENDANCE CHECK-IN" title="Scan classroom QR code">
+        <p style={{ margin: '0 0 16px', color: 'var(--muted)' }}>
+          To check into your current lecture or lab, open your camera to scan the code from the classroom display, or enter the session code.
+        </p>
+        <button className="button button-primary" onClick={() => setShowScanner(true)} style={{ padding: '12px 20px', fontSize: '15px' }}>
+          <Icon name="camera" size={18}/> Launch QR scanner modal
+        </button>
+      </Panel>
+    )}
+
     {active === 'attendance' && <Panel eyebrow="ATTENDANCE RECORD" title={`${attendance?.overallPercentage?.toFixed?.(1) ?? '—'}% overall`}><LoadNotice loading={loading} error={error} empty={!subjects.length} emptyText="No attendance records have been returned yet."/><div className="data-table-wrap"><table className="data-table"><thead><tr><th>Subject</th><th>Attended</th><th>Total</th><th>Attendance</th></tr></thead><tbody>{subjects.filter((subject) => `${subject.courseName} ${subject.shortCode}`.toLowerCase().includes(search.toLowerCase())).map((subject) => <tr key={subject.subjectId}><td><strong>{subject.courseName}</strong><small>{subject.shortCode || subject.courseCode}</small></td><td>{subject.attendedClasses}</td><td>{subject.totalClasses}</td><td><span className={`status-pill ${subject.percentage >= 75 ? 'status-present' : 'status-late'}`}>{Number(subject.percentage).toFixed(1)}%</span></td></tr>)}{!subjects.length && !loading && <EmptyRow columns={4}>No subject records yet.</EmptyRow>}</tbody></table></div></Panel>}
     {active === 'timetable' && <Panel eyebrow="WEEKLY SCHEDULE" title={`${session.className || 'Your section'}${session.labBatch ? ` · Batch ${session.labBatch}` : ''}`}><TimetableRows rows={data.timetable} search={search} emptyText="Your timetable hasn’t been published yet." showDay/></Panel>}
     {active === 'notifications' && <Panel eyebrow="CAMPUS UPDATES" title="Alerts & notifications"><LoadNotice loading={loading} error={error} empty={!data.notifications.length} emptyText="You’re all caught up."/>{data.notifications.filter((notice) => `${notice.title} ${notice.message} ${notice.type}`.toLowerCase().includes(search.toLowerCase())).map((notice) => <article className="portal-notice" key={notice.id}><span className={`notice-mark ${String(notice.type).toLowerCase()}`}><Icon name={notice.type === 'LOW_ATTENDANCE' ? 'attendance' : 'bell'} size={17}/></span><div><div className="notice-meta">{String(notice.type || 'GENERAL').replaceAll('_', ' ')} · {formatDateTime(notice.createdAt)}</div><h3>{notice.title}</h3><p>{notice.message}</p></div><span className={`read-mark ${notice.isRead ? 'is-read' : ''}`}/></article>)}</Panel>}
+
+    {showScanner && (
+      <StudentScannerModal
+        studentId={session.profileId}
+        onClose={() => setShowScanner(false)}
+        onSuccess={() => {
+          setRefresh((r) => r + 1)
+          setToast('Attendance marked successfully! You are recorded as PRESENT.')
+          setShowScanner(false)
+        }}
+      />
+    )}
   </>}</PortalShell>
 }
 
@@ -338,53 +538,296 @@ function StartSessionDialog({ facultyId, slots, onClose, onStarted }) {
 
 function LiveSessionView({ session: initialSession, onBack, onClosed }) {
   const [session, setSession] = useState(initialSession)
+  const [roster, setRoster] = useState([])
+  const [rosterLoading, setRosterLoading] = useState(true)
+  const [search, setSearch] = useState('')
+  const [filter, setFilter] = useState('ALL')
   const [refreshError, setRefreshError] = useState('')
-  const [studentId, setStudentId] = useState('')
-  const [status, setStatus] = useState('PRESENT')
-  const [remarks, setRemarks] = useState('Manual update by faculty')
-  const [manualBusy, setManualBusy] = useState(false)
+  const [actionBusy, setActionBusy] = useState(null)
   const [notice, setNotice] = useState('')
-  const [manualError, setManualError] = useState('')
   const [closing, setClosing] = useState(false)
+  const [cancelling, setCancelling] = useState(false)
+
+  const fetchSessionAndRoster = async () => {
+    try {
+      const [latestSession, latestRoster] = await Promise.all([
+        api.liveSession(initialSession.sessionId),
+        api.sessionRoster(initialSession.sessionId).catch(() => [])
+      ])
+      setSession(latestSession)
+      if (Array.isArray(latestRoster) && latestRoster.length > 0) {
+        setRoster(latestRoster)
+      }
+      setRefreshError('')
+    } catch (cause) {
+      setRefreshError(cause.message || 'Could not refresh session')
+    } finally {
+      setRosterLoading(false)
+    }
+  }
 
   useEffect(() => {
     let alive = true
-    async function refresh() {
-      try { const latest = await api.liveSession(initialSession.sessionId); if (alive) { setSession(latest); setRefreshError('') } }
-      catch (cause) { if (alive) setRefreshError(cause.message) }
-    }
-    refresh()
-    const timer = window.setInterval(refresh, 7000)
+    fetchSessionAndRoster()
+    const timer = window.setInterval(() => {
+      if (alive) fetchSessionAndRoster()
+    }, 5000)
     return () => { alive = false; window.clearInterval(timer) }
   }, [initialSession.sessionId])
 
-  async function markManual(event) {
-    event.preventDefault()
-    if (!window.confirm(`Apply ${status} to student ${studentId}? This updates their attendance record.`)) return
-    setManualBusy(true); setManualError(''); setNotice('')
+  async function toggleStudentStatus(student, targetStatus) {
+    const isProxyCheck = targetStatus === 'ABSENT'
+    const confirmMsg = isProxyCheck
+      ? `Mark ${student.fullName} (${student.registerNumber}) as ABSENT? This overrides their QR scan to prevent proxy.`
+      : `Mark ${student.fullName} (${student.registerNumber}) as PRESENT?`
+    if (!window.confirm(confirmMsg)) return
+
+    setActionBusy(student.studentId)
+    setNotice('')
+    setRoster(prev => prev.map(s => s.studentId === student.studentId ? { ...s, status: targetStatus } : s))
+
     try {
-      await api.manualAttendance({ sessionId: session.sessionId, records: [{ studentId: Number(studentId), status, remarks }] })
-      setNotice(`Student ${studentId} updated as ${status.toLowerCase()}.`)
-      setStudentId('')
-      setSession(await api.liveSession(session.sessionId))
-    } catch (cause) { setManualError(cause.message) } finally { setManualBusy(false) }
+      await api.manualAttendance({
+        sessionId: session.sessionId,
+        records: [{
+          studentId: student.studentId,
+          status: targetStatus,
+          remarks: isProxyCheck ? 'Marked absent by faculty (proxy check)' : 'Manually verified present by faculty'
+        }]
+      })
+      setNotice(`${student.fullName} marked as ${targetStatus}.`)
+      const latest = await api.liveSession(session.sessionId)
+      setSession(latest)
+    } catch (err) {
+      setRefreshError(err.message || 'Failed to update attendance status')
+      fetchSessionAndRoster()
+    } finally {
+      setActionBusy(null)
+    }
   }
 
   async function closeSession() {
-    if (!window.confirm('Close this session? Any eligible student without an attendance record will be marked absent.')) return
+    if (!window.confirm('Close this attendance session? Any eligible student who has not checked in will be permanently marked ABSENT.')) return
     setClosing(true)
-    try { await api.closeSession(session.sessionId); onClosed() } catch (cause) { setRefreshError(cause.message) } finally { setClosing(false) }
+    try {
+      await api.closeSession(session.sessionId)
+      onClosed()
+    } catch (cause) {
+      setRefreshError(cause.message)
+    } finally {
+      setClosing(false)
+    }
+  }
+
+  async function cancelSession() {
+    if (!window.confirm('Cancel this attendance session? All scanned attendance for this session will be discarded and no student will be penalized.')) return
+    setCancelling(true)
+    try {
+      if (api.cancelSession) {
+        await api.cancelSession(session.sessionId).catch(() => api.closeSession(session.sessionId))
+      } else {
+        await api.closeSession(session.sessionId)
+      }
+      onClosed()
+    } catch (cause) {
+      setRefreshError(cause.message)
+    } finally {
+      setCancelling(false)
+    }
   }
 
   const percent = session.totalEligibleCount ? Math.min(100, Math.round((session.presentCount / session.totalEligibleCount) * 100)) : 0
-  return <div className="live-view-overlay"><div className="live-view"><div className="live-view-header"><button className="text-button" onClick={onBack}>← Back to faculty workspace</button><span className="live-badge"><i/> SESSION LIVE</span></div>
-    <div className="live-view-grid"><section className="panel live-main-panel"><div className="live-session-heading"><div><span className="section-kicker">{session.section} · {session.targetBatch || 'ALL'} · {session.roomNumber || 'Room pending'}</span><h1>{session.courseName || `Subject ${session.subjectId}`}</h1><p>{session.shortCode || 'Attendance check-in'} · Started {formatDateTime(session.startTime)}</p></div><button className="button button-secondary" onClick={onBack}>Minimize</button></div>
-      <div className="qr-stage">{session.sessionToken ? <div className="qr-card"><QRCodeSVG value={session.sessionToken} size={244} level="H" includeMargin/><code>{session.sessionToken}</code></div> : <div className="portal-state">The session response did not include a QR token.</div>}<div className="qr-caption"><span className="qr-caption-icon"><Icon name="attendance" size={17}/></span><span><strong>Students can scan this code</strong><small>Share the QR on the classroom display. It expires when the session closes.</small></span></div></div>
-      <div className="live-count-row"><div><span className="section-kicker">CLASS CHECK-INS</span><strong>{session.presentCount || 0}<small> / {session.totalEligibleCount || '—'}</small></strong><p>Students checked in</p></div><div className="live-progress"><span style={{ width: `${percent}%` }}/></div><b>{session.totalEligibleCount ? `${percent}%` : 'Waiting for roster'}</b></div>
-      {refreshError && <div className="inline-warning">Live count could not refresh: {refreshError}</div>}
-      <div className="roster-limitation"><Icon name="people" size={17}/><span><strong>Live count updates every few seconds.</strong><small>The current API returns session totals, but it doesn’t expose the checked-in student roster.</small></span></div>
-    </section><aside className="panel manual-panel"><span className="section-kicker">FACULTY TOOL</span><h2>Manual attendance</h2><p>Record an override when a student cannot scan the code. The backend requires their student ID.</p><form onSubmit={markManual}><label className="form-label">Student ID<input type="number" min="1" value={studentId} onChange={(event) => setStudentId(event.target.value)} required/></label><label className="form-label">Status<select value={status} onChange={(event) => setStatus(event.target.value)}><option value="PRESENT">Present</option><option value="ABSENT">Absent</option></select></label><label className="form-label">Note<input value={remarks} onChange={(event) => setRemarks(event.target.value)} maxLength="180"/></label>{manualError && <div className="error-banner" role="alert">{manualError}</div>}{notice && <div className="success-banner">{notice}</div>}<button className="button button-secondary full-button" disabled={manualBusy || !studentId}>{manualBusy ? 'Updating…' : 'Apply manual update'}</button></form><div className="close-session-note"><strong>When class is over</strong><span>Closing marks every unchecked eligible student absent.</span><button className="button button-danger full-button" onClick={closeSession} disabled={closing}>{closing ? 'Closing…' : 'Close attendance session'}</button></div></aside></div>
-  </div></div>
+  const presentCount = roster.filter(s => s.status === 'PRESENT').length
+  const absentCount = roster.length - presentCount
+
+  const filteredRoster = roster.filter(s => {
+    const matchesSearch = `${s.fullName} ${s.registerNumber} ${s.rollNumber || ''} ${s.labBatch || ''}`.toLowerCase().includes(search.toLowerCase())
+    if (!matchesSearch) return false
+    if (filter === 'PRESENT') return s.status === 'PRESENT'
+    if (filter === 'ABSENT') return s.status === 'ABSENT'
+    return true
+  })
+
+  return (
+    <div className="live-view-overlay">
+      <div className="live-view">
+        <div className="live-view-header">
+          <button className="text-button" onClick={onBack}>← Back to faculty workspace</button>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <span className="live-badge"><i/> SESSION LIVE</span>
+            <button className="button button-danger" onClick={cancelSession} disabled={cancelling} style={{ padding: '6px 12px', fontSize: '13px' }}>
+              {cancelling ? 'Cancelling…' : '✖ Cancel session'}
+            </button>
+          </div>
+        </div>
+
+        <div className="live-view-grid">
+          <section className="panel live-main-panel">
+            <div className="live-session-heading">
+              <div>
+                <span className="section-kicker">{session.section} · {session.targetBatch || 'ALL'} · {session.roomNumber || 'Room pending'}</span>
+                <h1>{session.courseName || `Subject ${session.subjectId}`}</h1>
+                <p>{session.shortCode || 'Attendance check-in'} · Started {formatDateTime(session.startTime)}</p>
+              </div>
+              <button className="button button-secondary" onClick={onBack}>Minimize</button>
+            </div>
+
+            <div className="qr-stage">
+              {session.sessionToken ? (
+                <div className="qr-card">
+                  <QRCodeSVG value={session.sessionToken} size={220} level="H" includeMargin />
+                  <div style={{ marginTop: '8px', textAlign: 'center' }}>
+                    <small style={{ color: 'var(--muted)', display: 'block', marginBottom: '2px' }}>Session Token</small>
+                    <code style={{ fontSize: '12px' }}>{session.sessionToken}</code>
+                  </div>
+                </div>
+              ) : (
+                <div className="portal-state">The session response did not include a QR token.</div>
+              )}
+              <div className="qr-caption">
+                <span className="qr-caption-icon"><Icon name="attendance" size={17}/></span>
+                <span><strong>Project this QR on screen</strong><small>Students scan via their phone camera. Live roster updates automatically on the right.</small></span>
+              </div>
+            </div>
+
+            <div className="live-count-row">
+              <div>
+                <span className="section-kicker">CLASS CHECK-INS</span>
+                <strong>{session.presentCount || presentCount || 0}<small> / {session.totalEligibleCount || roster.length || '—'}</small></strong>
+                <p>Students verified in room</p>
+              </div>
+              <div className="live-progress"><span style={{ width: `${percent}%` }}/></div>
+              <b>{session.totalEligibleCount ? `${percent}%` : 'Waiting for roster'}</b>
+            </div>
+
+            {refreshError && <div className="inline-warning" style={{ margin: '8px 0' }}>{refreshError}</div>}
+            {notice && <div className="success-banner" style={{ margin: '8px 0', background: '#dcfce7', color: '#15803d', padding: '10px 14px', borderRadius: '6px' }}>{notice}</div>}
+
+            <div style={{ display: 'flex', gap: '10px', marginTop: '16px' }}>
+              <button className="button button-danger full-button" onClick={closeSession} disabled={closing} style={{ flex: 1, padding: '12px' }}>
+                {closing ? 'Closing session…' : '✓ Close session & mark absentees'}
+              </button>
+              <button className="button button-secondary" onClick={cancelSession} disabled={cancelling} style={{ padding: '12px 18px' }}>
+                {cancelling ? 'Cancelling…' : 'Cancel session'}
+              </button>
+            </div>
+          </section>
+
+          <aside className="panel manual-panel" style={{ display: 'flex', flexDirection: 'column', maxHeight: '720px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+              <span className="section-kicker">CLASS ROSTER · ANTI-PROXY</span>
+              <span style={{ fontSize: '12px', color: 'var(--muted)' }}>Live updates</span>
+            </div>
+            <h2>Students in {session.section}</h2>
+            <p style={{ margin: '0 0 12px', fontSize: '13px', color: 'var(--muted)' }}>
+              Spot students absent in person who scanned via proxy, and toggle their status immediately.
+            </p>
+
+            <div style={{ marginBottom: '10px' }}>
+              <input
+                type="text"
+                placeholder="Search student or SRN..."
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                style={{ width: '100%', padding: '8px 12px', fontSize: '13px', borderRadius: '6px', border: '1px solid var(--line)', background: 'var(--surface)' }}
+              />
+            </div>
+
+            <div style={{ display: 'flex', gap: '6px', marginBottom: '12px' }}>
+              <button
+                type="button"
+                className={`button ${filter === 'ALL' ? 'button-primary' : 'button-secondary'}`}
+                style={{ padding: '4px 10px', fontSize: '12px' }}
+                onClick={() => setFilter('ALL')}
+              >
+                All ({roster.length})
+              </button>
+              <button
+                type="button"
+                className={`button ${filter === 'PRESENT' ? 'button-primary' : 'button-secondary'}`}
+                style={{ padding: '4px 10px', fontSize: '12px', background: filter === 'PRESENT' ? '#16a34a' : undefined }}
+                onClick={() => setFilter('PRESENT')}
+              >
+                Present ({presentCount})
+              </button>
+              <button
+                type="button"
+                className={`button ${filter === 'ABSENT' ? 'button-primary' : 'button-secondary'}`}
+                style={{ padding: '4px 10px', fontSize: '12px', background: filter === 'ABSENT' ? '#dc2626' : undefined }}
+                onClick={() => setFilter('ABSENT')}
+              >
+                Absent ({absentCount})
+              </button>
+            </div>
+
+            <div style={{ flex: 1, overflowY: 'auto', border: '1px solid var(--line)', borderRadius: '8px', padding: '6px', background: 'var(--canvas)' }}>
+              {rosterLoading && <div style={{ padding: '20px', textAlign: 'center', color: 'var(--muted)', fontSize: '13px' }}>Loading student roster…</div>}
+              {!rosterLoading && filteredRoster.length === 0 && (
+                <div style={{ padding: '20px', textAlign: 'center', color: 'var(--muted)', fontSize: '13px' }}>
+                  {roster.length === 0 ? 'No students found in this section.' : 'No students match your search.'}
+                </div>
+              )}
+              {filteredRoster.map((st) => {
+                const isPresent = st.status === 'PRESENT'
+                const isUpdating = actionBusy === st.studentId
+                return (
+                  <div
+                    key={st.studentId}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      padding: '8px 10px',
+                      marginBottom: '4px',
+                      borderRadius: '6px',
+                      background: 'var(--surface)',
+                      border: isPresent ? '1px solid #bbf7d0' : '1px solid var(--line)',
+                      gap: '8px'
+                    }}
+                  >
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <strong style={{ fontSize: '13px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{st.fullName}</strong>
+                        {st.labBatch && <span style={{ fontSize: '10px', background: '#e2e8f0', padding: '1px 5px', borderRadius: '4px' }}>{st.labBatch}</span>}
+                      </div>
+                      <div style={{ fontSize: '11px', color: 'var(--muted)', fontFamily: 'monospace' }}>
+                        {st.registerNumber} {st.rollNumber ? `· ${st.rollNumber}` : ''}
+                      </div>
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span className={`status-pill ${isPresent ? 'status-present' : 'status-late'}`} style={{ fontSize: '11px', padding: '3px 7px' }}>
+                        {isPresent ? 'PRESENT' : 'ABSENT'}
+                      </span>
+                      <button
+                        type="button"
+                        className="button"
+                        disabled={isUpdating}
+                        onClick={() => toggleStudentStatus(st, isPresent ? 'ABSENT' : 'PRESENT')}
+                        style={{
+                          padding: '4px 8px',
+                          fontSize: '11px',
+                          background: isPresent ? '#fee2e2' : '#dcfce7',
+                          color: isPresent ? '#b91c1c' : '#15803d',
+                          border: isPresent ? '1px solid #fca5a5' : '1px solid #86efac',
+                          borderRadius: '4px',
+                          cursor: 'pointer',
+                          fontWeight: 600
+                        }}
+                        title={isPresent ? 'Anti-proxy: Mark absent if student is not physically in class' : 'Mark present manually'}
+                      >
+                        {isUpdating ? '…' : isPresent ? 'Mark Absent' : 'Mark Present'}
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </aside>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function SessionTable({ rows = [], search = '' }) {

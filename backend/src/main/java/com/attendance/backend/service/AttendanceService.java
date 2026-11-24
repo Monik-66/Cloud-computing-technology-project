@@ -4,6 +4,7 @@ import com.attendance.backend.dto.AttendanceSessionRequest;
 import com.attendance.backend.dto.AttendanceSessionResponse;
 import com.attendance.backend.dto.CheckInRequest;
 import com.attendance.backend.dto.ManualAttendanceRequest;
+import com.attendance.backend.dto.SessionRosterItem;
 import com.attendance.backend.entity.*;
 import com.attendance.backend.repository.*;
 import org.springframework.stereotype.Service;
@@ -212,6 +213,65 @@ public class AttendanceService {
         AttendanceSession session = sessionRepository.findById(sessionId)
                 .orElseThrow(() -> new RuntimeException("Session not found with id: " + sessionId));
         return mapToResponse(session);
+    }
+
+    /**
+     * Teacher cancels the session: marks it CANCELLED, wipes any scanned records
+     */
+    @Transactional
+    public AttendanceSessionResponse cancelSession(Long sessionId) {
+        AttendanceSession session = sessionRepository.findById(sessionId)
+                .orElseThrow(() -> new RuntimeException("Session not found with id: " + sessionId));
+
+        session.setStatus(SessionStatus.CANCELLED);
+        session.setEndTime(LocalDateTime.now());
+        recordRepository.deleteAll(recordRepository.findByAttendanceSessionId(sessionId));
+        AttendanceSession saved = sessionRepository.save(session);
+        return mapToResponse(saved);
+    }
+
+    /**
+     * Get live class roster for a session with each student's current status (PRESENT / ABSENT)
+     */
+    public List<SessionRosterItem> getSessionRoster(Long sessionId) {
+        AttendanceSession session = sessionRepository.findById(sessionId)
+                .orElseThrow(() -> new RuntimeException("Session not found with id: " + sessionId));
+
+        List<Student> eligibleStudents;
+        if ("ALL".equalsIgnoreCase(session.getTargetBatch())) {
+            eligibleStudents = studentRepository.findByCollegeClassId(session.getCollegeClass().getId());
+        } else {
+            eligibleStudents = studentRepository.findByCollegeClassIdAndLabBatch(
+                    session.getCollegeClass().getId(), session.getTargetBatch());
+        }
+
+        List<AttendanceRecord> records = recordRepository.findByAttendanceSessionId(sessionId);
+        Map<Long, AttendanceRecord> recordMap = new HashMap<>();
+        for (AttendanceRecord r : records) {
+            recordMap.put(r.getStudent().getId(), r);
+        }
+
+        List<SessionRosterItem> roster = new ArrayList<>();
+        for (Student s : eligibleStudents) {
+            AttendanceRecord rec = recordMap.get(s.getId());
+            AttendanceStatus status = (rec != null) ? rec.getStatus() : AttendanceStatus.ABSENT;
+            AttendanceMethod method = (rec != null) ? rec.getVerificationMethod() : null;
+            LocalDateTime markedAt = (rec != null) ? rec.getMarkedAt() : null;
+
+            roster.add(new SessionRosterItem(
+                    s.getId(),
+                    s.getRegisterNumber(),
+                    s.getRollNumber(),
+                    s.getFullName(),
+                    s.getLabBatch(),
+                    status,
+                    method,
+                    markedAt
+            ));
+        }
+
+        roster.sort(Comparator.comparing(SessionRosterItem::getRegisterNumber));
+        return roster;
     }
 
     private AttendanceSessionResponse mapToResponse(AttendanceSession s) {
